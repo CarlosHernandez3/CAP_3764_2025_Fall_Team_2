@@ -8,7 +8,7 @@ It’s designed as a collaborative data science workflow with full environment r
 ## 🎓 Course Information
 
 **Course:** CAP 3764 — *Advanced Data Science*  
-**Institution:** Florida International University
+**Institution:** [Florida International University]
 **Team Members:**  
 - Luis D. Jimenez  
 - Carlos Hernandez  
