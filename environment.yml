@@ -1,0 +1,13 @@
+name: adv_ds
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - scikit-learn
+  - jupyterlab
+  - pandas
+  - numpy
+  - matplotlib
+  - seaborn
+prefix: /opt/anaconda3/envs/adv_ds
