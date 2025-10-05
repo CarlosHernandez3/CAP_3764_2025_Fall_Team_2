@@ -10,4 +10,10 @@ dependencies:
   - numpy
   - matplotlib
   - seaborn
+  - ipykernel
+  - pip
+  - pip:
+      - ipywidgets
+post_create:
+  - python -m ipykernel install --user --name=adv_ds --display-name "Python (adv_ds)"
 prefix: /opt/anaconda3/envs/adv_ds
