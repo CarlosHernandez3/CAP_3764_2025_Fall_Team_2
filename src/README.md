@@ -1,116 +1,129 @@
-
 # Preprocessing Module
 
-This module provides a clean and consistent pipeline for preparing **train and test**
-datasets for a store‑sales forecasting project. It ensures:
+This module provides a repeatable pipeline for preparing store-level sales data for modeling. It keeps train and test processing aligned, avoids leakage, and makes the train-time choices (transforms, scalers, feature list) explicit and reusable.
 
-- identical transformations for train and test  
-- no leakage from test into train  
-- reproducible lag creation and feature engineering  
-- deterministic transformations derived ONLY from training  
+## Layout
 
-## Directory Structure
+- data/train.csv, data/test.csv: sales records (Date, Store, Sales, Customers, etc.)
+- data/store.csv: store metadata used for joins and feature expansion
+- src/data_utils/preprocessing.py: preprocessing functions and defaults
+
+## Key Ideas
+
+- Train and test are cleaned separately but use the same rules.
+- Transform choices (log/sqrt/fourth-root) are hardcoded tuples at the top of `preprocessing.py` and must be decided using training data only.
+- Scaling is fit on train once via `scale_train`; reuse the same scalers with `scale_test`.
+- Store and date handling is standardized through `PreprocessingConfig` (store column, date column, target name, lags, correlation threshold).
+
+## Setup (conda)
+
+Update the existing environment named `adv_ds` (creates it if missing) from `store_sale_prediction_env.yml`:
 
 ```
-CAP_3764_2025_FALL_TEAM_2/
-│
-├── data/
-│   ├── train.csv
-│   ├── test.csv
-│   └── store.csv
-│
-└── src/
-    └── data_utils/
-        └── preprocessing.py
+conda env update -n adv_ds -f store_sale_prediction_env.yml --prune
 ```
 
-## Key Design Principles
+Then activate it:
 
-### ✔ Train and Test Are Preprocessed Separately  
-You load and clean `train.csv` and `test.csv` independently.  
-Both are merged with `store.csv`.
+```
+conda activate adv_ds
+```
 
-### ✔ Transformations for Test Are **Hardcoded**
-Transforms like log/sqrt/fourth-root MUST be chosen during **training** and stored as:
+## Manual workflow (train -> test)
 
 ```python
-LOG_TRANSFORM_COLS = (...)
-SQRT_TRANSFORM_COLS = (...)
-FOURTH_ROOT_COLS = (...)
-```
-
-These are defined at the top of `preprocessing.py` and applied equally to **train and test**.
-
-### ✔ Scaling Uses Train-Fitted Scalers ONLY  
-- During training → `scale_train()` fits scalers  
-- During test → `scale_test()` reuses those fitted scalers  
-
----
-
-## Common Workflow
-
-### 1. Preprocess Train
-
-```python
-from src.data_utils.preprocessing import *
+from src.data_utils.preprocessing import (
+    PreprocessingConfig,
+    load_train,
+    load_store,
+    clean_sales_dataframe,
+    clean_store,
+    merge_sales_store,
+    add_calendar_features,
+    add_lag_features,
+    apply_hardcoded_transforms,
+    scale_train,
+    scale_test,
+)
 
 config = PreprocessingConfig()
 
+# Train prep
 train = load_train("data/train.csv")
 store = load_store("data/store.csv")
-
 train = clean_sales_dataframe(train, config)
 store = clean_store(store)
-
 train = merge_sales_store(train, store, config)
 train = add_calendar_features(train)
-
-train = add_lag_features(train, "Store", ["Sales", "Customers"], config.lags)
-
-# Apply hardcoded transforms decided from training EDA
+train = add_lag_features(train, group_col=config.store_col, lagged_cols=[config.target_col, "Customers"], lags=config.lags)
 train = apply_hardcoded_transforms(train)
 
-# Select numeric columns and scale
-numeric_cols = train.select_dtypes(include="float64").columns
-train_scaled, x_scaler, y_scaler = scale_train(train, numeric_cols, target_col="sqrt_Sales")
+# Choose numeric columns to scale (exclude the target if present)
+numeric_cols = [c for c in train.select_dtypes(include=["float64", "float32"]).columns if c != config.target_col]
+train_scaled, x_scaler, y_scaler = scale_train(train, numeric_cols=numeric_cols, target_col=config.target_col)
+
+# Save these for inference
+# numeric_cols, x_scaler, y_scaler
+
+# Test/holdout prep using the same decisions
+# test = load_train("data/test.csv")  # use load_train for any CSV with the same schema
+# test = clean_sales_dataframe(test, config)
+# test = merge_sales_store(test, store, config)
+# test = add_calendar_features(test)
+# test = add_lag_features(test, group_col=config.store_col, lagged_cols=[config.target_col, "Customers"], lags=config.lags)
+# test = apply_hardcoded_transforms(test)
+# test_scaled = scale_test(test, numeric_cols=numeric_cols, x_scaler=x_scaler, target_col=None, y_scaler=None)
 ```
 
-Save:
+## Quick split helper
 
-```
-x_scaler, y_scaler, numeric_cols, feature_list
-```
+`prepare_train_test_split(train_path, store_path, config, lagged_cols=None, numeric_cols=None)`
 
----
+- Loads train and store, cleans, merges, adds calendar/lag features, applies hardcoded transforms.
+- Splits by date: latest 25% of unique dates become the holdout set.
+- Scales both subsets; returns `(train_scaled, test_scaled, x_scaler, y_scaler)`.
+- Override `lagged_cols` or `numeric_cols` to control which columns are lagged or scaled.
 
-## 2. Preprocess Test (NO refitting!)
+### Example: single call to get train, test, and scalers
 
 ```python
-test = load_test("data/test.csv")
+from pathlib import Path
+from joblib import dump, load
+from src.data_utils.preprocessing import PreprocessingConfig, prepare_train_test_split
 
-test = clean_sales_dataframe(test, config)
-test = merge_sales_store(test, store, config)
-test = add_calendar_features(test)
-test = add_lag_features(test, "Store", ["Sales", "Customers"], config.lags)
+config = PreprocessingConfig()
 
-# Use SAME transforms chosen in train
-test = apply_hardcoded_transforms(test)
-
-# Apply SAME numerical columns and scalers
-test_scaled = scale_test(
-    test,
-    numeric_cols=numeric_cols,     # from training
-    x_scaler=x_scaler,             # fitted in training
-    target_col=None,               # no target in test
-    y_scaler=None
+# Build ready-to-model sets plus scalers in one step
+train_scaled, test_scaled, x_scaler, y_scaler = prepare_train_test_split(
+    train_path=Path("data/train.csv"),
+    store_path=Path("data/store.csv"),
+    config=config,
+    # optional overrides:
+    # lagged_cols=["Sales", "Customers"],
+    # numeric_cols=["sqrt_Sales", "sqrt_Customers", ...],
 )
+
+# Persist the scalers for reuse in inference/production
+dump(x_scaler, "artifacts/x_scaler.joblib")
+if y_scaler is not None:
+    dump(y_scaler, "artifacts/y_scaler.joblib")
+
+# Later (e.g., in an inference script) load and reuse them
+x_scaler = load("artifacts/x_scaler.joblib")
+y_scaler = load("artifacts/y_scaler.joblib")
 ```
 
----
+## Hardcoded transforms
 
-## Notes
+Edit `LOG_TRANSFORM_COLS`, `SQRT_TRANSFORM_COLS`, and `FOURTH_ROOT_COLS` in `preprocessing.py` after exploring the training data. These tuples drive `apply_hardcoded_transforms` for both train and test, ensuring the same feature math everywhere.
 
-- This module **ensures reproducibility** and prevents test leakage.
-- It is meant for **real ML workflows**, not only Kaggle-style notebooks.
-- You can extend `preprocessing.py` with more domain features as needed.
+## Extra utilities
 
+- `get_correlated_features(df, target_col, threshold)`: pick features above an absolute correlation cutoff with the target.
+- `plot_hist_grid(df, cols)`: quick histogram grid for exploratory checks.
+
+## Good practices
+
+- Keep `PreprocessingConfig` consistent between training and inference.
+- Persist `numeric_cols`, `x_scaler`, `y_scaler`, and any feature list your model expects.
+- Never refit scalers on test or production data; reuse the training-fitted objects.
