@@ -1,175 +1,116 @@
-# Data Preprocessing Helper Module
 
-This mini-package contains a reusable preprocessing module for a store-sales style
-time series project (e.g. Rossmann). It is designed to live inside your project
-as a helper module and be imported from notebooks or training scripts.
+# Preprocessing Module
 
+This module provides a clean and consistent pipeline for preparing **train and test**
+datasets for a store‑sales forecasting project. It ensures:
 
-```bash
-touch src/__init__.py
-touch src/data_utils/__init__.py
+- identical transformations for train and test  
+- no leakage from test into train  
+- reproducible lag creation and feature engineering  
+- deterministic transformations derived ONLY from training  
+
+## Directory Structure
+
+```
+CAP_3764_2025_FALL_TEAM_2/
+│
+├── data/
+│   ├── train.csv
+│   ├── test.csv
+│   └── store.csv
+│
+└── src/
+    └── data_utils/
+        └── preprocessing.py
 ```
 
-## Installation / setup
+## Key Design Principles
 
-Make sure your environment has the required Python packages:
-- `pandas`
-- `numpy`
-- `scikit-learn`
-- `matplotlib`
+### ✔ Train and Test Are Preprocessed Separately  
+You load and clean `train.csv` and `test.csv` independently.  
+Both are merged with `store.csv`.
 
-If you are not sure you have the packages, use `store_sale_prediction_env.yml`, located in the repo directory to install them
-
-```bash
-conda env update -n adv_ds -f store_sale_prediction_env.yml --prune
-```
-
-## How to import in a notebook
-
-From a notebook whose working directory is the **project root**:
+### ✔ Transformations for Test Are **Hardcoded**
+Transforms like log/sqrt/fourth-root MUST be chosen during **training** and stored as:
 
 ```python
-from src.data_utils.preprocessing import (
-    PreprocessingConfig,
-    load_train,
-    load_store,
-    clean_train,
-    clean_store,
-    merge_train_store,
-    add_calendar_features,
-    add_lag_features,
-    summarize_numeric,
-    transform_by_mean_median,
-    fourth_root_column,
-    get_correlated_features,
-    scale_features,
-)
+LOG_TRANSFORM_COLS = (...)
+SQRT_TRANSFORM_COLS = (...)
+FOURTH_ROOT_COLS = (...)
 ```
 
+These are defined at the top of `preprocessing.py` and applied equally to **train and test**.
 
-## End-to-end example
+### ✔ Scaling Uses Train-Fitted Scalers ONLY  
+- During training → `scale_train()` fits scalers  
+- During test → `scale_test()` reuses those fitted scalers  
 
-Below is a typical end-to-end usage for a store-sales forecasting project.
+---
+
+## Common Workflow
+
+### 1. Preprocess Train
 
 ```python
-from pathlib import Path
-from src.data_utils.preprocessing import (
-    PreprocessingConfig,
-    load_train,
-    load_store,
-    clean_train,
-    clean_store,
-    merge_train_store,
-    add_calendar_features,
-    add_lag_features,
-    summarize_numeric,
-    transform_by_mean_median,
-    fourth_root_column,
-    get_correlated_features,
-    scale_features,
-)
+from src.data_utils.preprocessing import *
 
-# 1. Configuration
-config = PreprocessingConfig(
-    date_col="Date",
-    store_col="Store",
-    target_col="Sales",
-    lags=(1, 7, 14, 28, 365),
-    corr_threshold=0.15,
-)
+config = PreprocessingConfig()
 
-# 2. Load data
-data_dir = Path("data")
-train = load_train(data_dir / "train.csv")
-store = load_store(data_dir / "store.csv")
+train = load_train("data/train.csv")
+store = load_store("data/store.csv")
 
-# 3. Basic cleaning
-train_clean = clean_train(train, config)
-store_clean = clean_store(store)
+train = clean_sales_dataframe(train, config)
+store = clean_store(store)
 
-# 4. Merge and add calendar features
-df = merge_train_store(train_clean, store_clean, config)
-df = add_calendar_features(df)
+train = merge_sales_store(train, store, config)
+train = add_calendar_features(train)
 
-# 5. Add lagged features per store for Sales and Customers
-df = add_lag_features(
-    df,
-    group_col=config.store_col,
-    lagged_cols=["Sales", "Customers"],
-    lags=config.lags,
-)
+train = add_lag_features(train, "Store", ["Sales", "Customers"], config.lags)
 
-# (Optional) Drop Customers if you only want to use lagged Customers
-df = df.drop(columns=["Customers"])
+# Apply hardcoded transforms decided from training EDA
+train = apply_hardcoded_transforms(train)
 
-# 6. Summarize numeric columns
-float_cols = df.select_dtypes(include="float64").columns.tolist()
-features_summ = summarize_numeric(df, float_cols)
-
-# 7. Automatic log/sqrt transforms based on mean vs median
-df = transform_by_mean_median(
-    df,
-    features_summ,
-    exclude=[config.target_col],  # don't transform the raw target
-)
-
-# 8. 4th-root transformation for CompetitionDistance (if present)
-if "sqrt_CompetitionDistance" in df.columns:
-    df = fourth_root_column(
-        df,
-        col="sqrt_CompetitionDistance",
-        new_name="CompetitionDistance_4th_root",
-    )
-
-# 9. Get numeric features highly correlated with transformed target
-target_name = "sqrt_Sales"  # after transform_by_mean_median this is typical
-high_corr_cols, corr_table = get_correlated_features(
-    df,
-    target_col=target_name,
-    threshold=config.corr_threshold,
-)
-
-print("Numeric features with |corr| ≥ threshold:")
-print(corr_table)
-
-# 10. Build modeling dataframe
-int_cols = df.select_dtypes(include="int64").columns.tolist()
-
-modeling_cols = (
-    [config.store_col]      # categorical store ID
-    + int_cols              # integer / dummy variables
-    + high_corr_cols        # selected numeric features
-    + [target_name]         # transformed target
-)
-
-df_model = df[modeling_cols].dropna()
-
-# 11. Scale numeric features and target for modeling
-numeric_cols = df_model.select_dtypes(include="float64").columns.tolist()
-df_scaled, x_scaler, y_scaler = scale_features(
-    df_model,
-    numeric_cols=numeric_cols,
-    target_col=target_name,
-)
+# Select numeric columns and scale
+numeric_cols = train.select_dtypes(include="float64").columns
+train_scaled, x_scaler, y_scaler = scale_train(train, numeric_cols, target_col="sqrt_Sales")
 ```
 
-## Optional: plotting helper
+Save:
 
-The module also provides a simple histogram grid helper for quick EDA:
+```
+x_scaler, y_scaler, numeric_cols, feature_list
+```
+
+---
+
+## 2. Preprocess Test (NO refitting!)
 
 ```python
-from src.data_utils.preprocessing import plot_hist_grid
+test = load_test("data/test.csv")
 
-float_cols = df.select_dtypes(include="float64").columns
-plot_hist_grid(df, float_cols)
+test = clean_sales_dataframe(test, config)
+test = merge_sales_store(test, store, config)
+test = add_calendar_features(test)
+test = add_lag_features(test, "Store", ["Sales", "Customers"], config.lags)
+
+# Use SAME transforms chosen in train
+test = apply_hardcoded_transforms(test)
+
+# Apply SAME numerical columns and scalers
+test_scaled = scale_test(
+    test,
+    numeric_cols=numeric_cols,     # from training
+    x_scaler=x_scaler,             # fitted in training
+    target_col=None,               # no target in test
+    y_scaler=None
+)
 ```
 
-This will draw a grid of histograms with vertical lines for mean and median
-for each feature.
+---
 
-## Adapting to your project
+## Notes
 
-You can safely edit `PreprocessingConfig` and the helper functions to match your
-project's column names and logic. The goal of this module is to group common
-preprocessing steps in a clean, testable, and reusable way instead of having
-all logic inside notebooks.
+- This module **ensures reproducibility** and prevents test leakage.
+- It is meant for **real ML workflows**, not only Kaggle-style notebooks.
+- You can extend `preprocessing.py` with more domain features as needed.
+

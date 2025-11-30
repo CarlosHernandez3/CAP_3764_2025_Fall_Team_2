@@ -1,15 +1,19 @@
+
 from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Sequence, Tuple, List, Optional
+from typing import Sequence, Tuple, List, Optional
 
 import numpy as np
 import pandas as pd
 from sklearn.preprocessing import StandardScaler
-
 import matplotlib.pyplot as plt
 
+
+# ============================================================
+# Configuration
+# ============================================================
 
 @dataclass
 class PreprocessingConfig:
@@ -23,45 +27,59 @@ class PreprocessingConfig:
     corr_threshold: float = 0.15
 
 
+# ============================================================
+# Deterministic, TRAIN-derived transformations (HARD-CODED)
+# ------------------------------------------------------------
+# These must be set AFTER analyzing the TRAINING dataset.
+# They MUST NOT depend on the test data.
+# ============================================================
+
+LOG_TRANSFORM_COLS: Tuple[str, ...] = ()
+SQRT_TRANSFORM_COLS: Tuple[str, ...] = ()
+FOURTH_ROOT_COLS: Tuple[str, ...] = ()
+
+
+# ============================================================
+# Loading
+# ============================================================
+
 def load_train(path: str | Path) -> pd.DataFrame:
-    """Load the training dataset from CSV."""
     return pd.read_csv(Path(path))
 
+def load_test(path: str | Path) -> pd.DataFrame:
+    return pd.read_csv(Path(path))
 
 def load_store(path: str | Path) -> pd.DataFrame:
-    """Load the store metadata dataset from CSV."""
     return pd.read_csv(Path(path))
 
 
-def clean_train(train: pd.DataFrame, config: PreprocessingConfig) -> pd.DataFrame:
+# ============================================================
+# Cleaning (shared by train and test)
+# ============================================================
+
+def clean_sales_dataframe(df: pd.DataFrame, config: PreprocessingConfig) -> pd.DataFrame:
     """
-    Basic cleaning of the train dataframe:
-    - Parse dates
-    - Convert StateHoliday to binary
-    - Ensure numeric types for Sales and Customers
+    Cleaning logic used for BOTH train and test.
     """
-    df = train.copy()
+    out = df.copy()
 
-    df[config.date_col] = pd.to_datetime(df[config.date_col], format="%Y-%m-%d")
+    out[config.date_col] = pd.to_datetime(out[config.date_col], format="%Y-%m-%d")
 
-    if "StateHoliday" in df.columns:
-        df["StateHoliday"] = df["StateHoliday"].isin(["a", "b", "c"]).astype("int64")
+    if "StateHoliday" in out.columns:
+        out["StateHoliday"] = out["StateHoliday"].isin(["a", "b", "c"]).astype("int64")
 
-    if config.target_col in df.columns:
-        df[config.target_col] = df[config.target_col].astype("float64")
+    if config.target_col in out.columns:
+        out[config.target_col] = out[config.target_col].astype("float64")
 
-    if "Customers" in df.columns:
-        df["Customers"] = df["Customers"].astype("float64")
+    if "Customers" in out.columns:
+        out["Customers"] = out["Customers"].astype("float64")
 
-    return df
+    return out
 
 
 def clean_store(store: pd.DataFrame) -> pd.DataFrame:
     """
-    Basic cleaning and feature engineering for the store dataframe:
-    - Fill/convert Promo2SinceWeek, Promo2SinceYear, CompetitionOpenSinceYear
-    - Create dummies for CompetitionOpenSinceMonth (month name)
-    - Create dummies for PromoInterval (comma-separated string)
+    Same as before; no changes required.
     """
     df = store.copy()
 
@@ -75,10 +93,7 @@ def clean_store(store: pd.DataFrame) -> pd.DataFrame:
         ).dt.month_name()
 
         comp_dummies = pd.get_dummies(
-            comp_month,
-            prefix="Competition_open_since",
-            drop_first=True,
-            dtype="int64",
+            comp_month, prefix="Competition_open_since", drop_first=True, dtype="int64"
         )
         df = df.join(comp_dummies)
 
@@ -93,42 +108,41 @@ def clean_store(store: pd.DataFrame) -> pd.DataFrame:
             dummies = dummies.iloc[:, 1:]
         df = df.join(dummies)
 
-    drop_cols: List[str] = []
-    for col in ["CompetitionOpenSinceMonth", "PromoInterval"]:
-        if col in df.columns:
-            drop_cols.append(col)
-
+    drop_cols = [c for c in ["CompetitionOpenSinceMonth", "PromoInterval"] if c in df.columns]
     if drop_cols:
         df = df.drop(columns=drop_cols)
 
     return df
 
 
-def merge_train_store(
-    train: pd.DataFrame,
-    store: pd.DataFrame,
+# ============================================================
+# Merging
+# ============================================================
+
+def merge_sales_store(
+    sales_df: pd.DataFrame,
+    store_df: pd.DataFrame,
     config: PreprocessingConfig,
 ) -> pd.DataFrame:
-    """
-    Merge cleaned train and store dataframes on the store column.
-    Sets the date column as the index and sorts by date.
-    """
-    df = train.join(
-        store.set_index(config.store_col),
+
+    df = sales_df.join(
+        store_df.set_index(config.store_col),
         on=config.store_col,
         how="left",
     )
 
     df[config.store_col] = pd.Categorical(df[config.store_col])
     df = df.set_index(config.date_col).sort_index()
-
     return df
 
 
+# ============================================================
+# Calendar & Lag Features
+# ============================================================
+
 def add_calendar_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Add calendar features (Year, Month, Day) from the DatetimeIndex."""
     if not isinstance(df.index, pd.DatetimeIndex):
-        raise ValueError("DataFrame index must be a DatetimeIndex to add calendar features.")
+        raise ValueError("DataFrame index must be a DatetimeIndex.")
 
     out = df.copy()
     out["Month"] = out.index.month
@@ -137,114 +151,54 @@ def add_calendar_features(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def add_lag_features(
-    df: pd.DataFrame,
-    group_col: str,
-    lagged_cols: Sequence[str],
-    lags: Sequence[int],
-) -> pd.DataFrame:
-    """
-    Add lagged features for the given numeric columns, grouped by `group_col`.
-    """
+def add_lag_features(df: pd.DataFrame, group_col: str, lagged_cols: Sequence[str], lags: Sequence[int]):
     out = df.copy()
     grouped = out.groupby(group_col, observed=True)
 
     for lag in lags:
         for col in lagged_cols:
-            if col not in out.columns:
-                continue
-            out[f"{col}_lag{lag}"] = grouped[col].shift(lag)
-
+            if col in out.columns:
+                out[f"{col}_lag{lag}"] = grouped[col].shift(lag)
     return out
 
 
-def summarize_numeric(
-    df: pd.DataFrame,
-    cols: Sequence[str] | None = None,
-) -> pd.DataFrame:
+# ============================================================
+# Hardcoded Transformations (Train + Test)
+# ============================================================
+
+def apply_hardcoded_transforms(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Compute mean and median for each numeric feature.
-
-    Returns a dataframe with columns: ["Feature", "mean_val", "median_val"].
-    """
-    if cols is None:
-        cols = df.select_dtypes(include="float64").columns.tolist()
-
-    means = df[cols].mean()
-    medians = df[cols].median()
-
-    features_summ = pd.DataFrame(
-        {
-            "Feature": cols,
-            "mean_val": means.values,
-            "median_val": medians.values,
-        }
-    )
-    return features_summ
-
-
-def transform_by_mean_median(
-    df: pd.DataFrame,
-    features_summ: pd.DataFrame,
-    exclude: Sequence[str] | None = None,
-) -> pd.DataFrame:
-    """
-    Apply log or sqrt transforms based on mean/median comparison:
-
-    - If mean < median: x -> log(x + 1)
-    - If mean > median: x -> sqrt(x)
-    - Else: no transform
+    Apply deterministic transformations based ONLY on rules defined
+    from the TRAIN dataset.
     """
     out = df.copy()
-    exclude = set(exclude or [])
 
-    for _, row in features_summ.iterrows():
-        feature = row["Feature"]
-        if feature in exclude:
-            continue
-        if feature not in out.columns:
-            continue
+    # log(x+1)
+    for col in LOG_TRANSFORM_COLS:
+        if col in out.columns:
+            out[f"log_{col}"] = np.log(out[col].clip(lower=0) + 1)
 
-        mean_val = row["mean_val"]
-        median_val = row["median_val"]
+    # sqrt(x)
+    for col in SQRT_TRANSFORM_COLS:
+        if col in out.columns:
+            out[f"sqrt_{col}"] = np.sqrt(out[col].clip(lower=0))
 
-        if mean_val < median_val:
-            out[feature] = np.log(out[feature] + 1.0)
-            out = out.rename(columns={feature: f"log_{feature}"})
-        elif mean_val > median_val:
-            out[feature] = np.sqrt(out[feature])
-            out = out.rename(columns={feature: f"sqrt_{feature}"})
+    # fourth-root
+    for col in FOURTH_ROOT_COLS:
+        if col in out.columns:
+            out[f"{col}_4th_root"] = np.sqrt(np.sqrt(out[col].clip(lower=0)))
 
     return out
 
 
-def fourth_root_column(df: pd.DataFrame, col: str, new_name: Optional[str] = None) -> pd.DataFrame:
-    """
-    Apply a 4th-root transform using sqrt(sqrt(x)).
-    """
-    if new_name is None:
-        new_name = f"{col}_4th_root"
+# ============================================================
+# Correlation (Train only)
+# ============================================================
 
-    out = df.copy()
-    values = out[col]
-    out[new_name] = np.sqrt(np.sqrt(values.clip(lower=0)))
-    return out
-
-
-def get_correlated_features(
-    df: pd.DataFrame,
-    target_col: str,
-    threshold: float,
-) -> Tuple[List[str], pd.DataFrame]:
-    """
-    Get numeric features whose absolute correlation with `target_col`
-    is above the given threshold.
-
-    Returns (high_corr_cols, corr_table).
-    """
+def get_correlated_features(df: pd.DataFrame, target_col: str, threshold: float):
     float_cols = df.select_dtypes(include="float64").columns
     if target_col not in float_cols:
-        raise ValueError(f"{target_col!r} must be a float64 column to compute correlations.")
+        raise ValueError(f"{target_col} must be float64.")
 
     corr = df[float_cols].corr()
     target_corr = corr[target_col].drop(target_col)
@@ -262,32 +216,45 @@ def get_correlated_features(
     return high_corr_cols, corr_table
 
 
-def scale_features(
-    df: pd.DataFrame,
-    numeric_cols: Sequence[str],
-    target_col: str,
-) -> Tuple[pd.DataFrame, StandardScaler, StandardScaler]:
-    """
-    Standardize numeric features and target using sklearn's StandardScaler.
-    """
-    df_scaled = df.copy()
+# ============================================================
+# Scaling: Train vs Test
+# ============================================================
+
+def scale_train(df: pd.DataFrame, numeric_cols: Sequence[str], target_col: Optional[str] = None):
+    out = df.copy()
 
     x_scaler = StandardScaler()
-    df_scaled[numeric_cols] = x_scaler.fit_transform(df_scaled[numeric_cols])
+    out[numeric_cols] = x_scaler.fit_transform(out[numeric_cols])
 
-    y_scaler = StandardScaler()
-    df_scaled[target_col] = y_scaler.fit_transform(df_scaled[[target_col]]).ravel()
+    y_scaler = None
+    if target_col is not None and target_col in out.columns:
+        y_scaler = StandardScaler()
+        out[target_col] = y_scaler.fit_transform(out[[target_col]]).ravel()
 
-    return df_scaled, x_scaler, y_scaler
+    return out, x_scaler, y_scaler
 
 
-def plot_hist_grid(
+def scale_test(
     df: pd.DataFrame,
-    cols: Sequence[str],
-) -> None:
-    """
-    Plot a grid of histograms for the given columns.
-    """
+    numeric_cols: Sequence[str],
+    x_scaler: StandardScaler,
+    target_col: Optional[str] = None,
+    y_scaler: Optional[StandardScaler] = None,
+):
+    out = df.copy()
+    out[numeric_cols] = x_scaler.transform(out[numeric_cols])
+
+    if target_col and y_scaler and target_col in out.columns:
+        out[target_col] = y_scaler.transform(out[[target_col]]).ravel()
+
+    return out
+
+
+# ============================================================
+# Optional Plotting
+# ============================================================
+
+def plot_hist_grid(df: pd.DataFrame, cols: Sequence[str]):
     cols = list(cols)
     n = len(cols)
     if n == 0:
@@ -296,30 +263,16 @@ def plot_hist_grid(
     y = int(np.sqrt(n))
     x = int(np.ceil(n / y))
 
-    fig, axes = plt.subplots(
-        nrows=y,
-        ncols=x,
-        figsize=(16, 10),
-        sharex=False,
-        sharey=False,
-    )
-
+    fig, axes = plt.subplots(y, x, figsize=(16, 10), sharex=False, sharey=False)
     axes = np.array(axes).reshape(-1)
 
     for i, col in enumerate(cols):
         ax = axes[i]
         data = df[col].dropna()
-
-        mean_val = data.mean()
-        median_val = data.median()
-
         ax.hist(data, bins=30, alpha=0.7)
-        ax.axvline(mean_val, linestyle="--", linewidth=1.5, label="Mean")
-        ax.axvline(median_val, linestyle=":", linewidth=1.5, label="Median")
-        ax.set_title(f"Histogram of {col}")
-        ax.legend()
+        ax.set_title(col)
 
-    for j in range(n, x * y):
+    for j in range(n, x*y):
         axes[j].set_visible(False)
 
     plt.tight_layout()
@@ -329,16 +282,19 @@ def plot_hist_grid(
 __all__ = [
     "PreprocessingConfig",
     "load_train",
+    "load_test",
     "load_store",
-    "clean_train",
+    "clean_sales_dataframe",
     "clean_store",
-    "merge_train_store",
+    "merge_sales_store",
     "add_calendar_features",
     "add_lag_features",
-    "summarize_numeric",
-    "transform_by_mean_median",
-    "fourth_root_column",
+    "apply_hardcoded_transforms",
+    "LOG_TRANSFORM_COLS",
+    "SQRT_TRANSFORM_COLS",
+    "FOURTH_ROOT_COLS",
     "get_correlated_features",
-    "scale_features",
+    "scale_train",
+    "scale_test",
     "plot_hist_grid",
 ]
