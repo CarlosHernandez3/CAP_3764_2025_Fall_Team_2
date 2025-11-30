@@ -35,6 +35,7 @@ MANIFEST
 # Installer logs
 pip-log.txt
 pip-delete-this-directory.txt
+models/prototype_random_forest.joblib
 
 # Unit test / coverage reports
 htmlcov/
