@@ -588,7 +588,6 @@ def prepare_train_test_split(
 __all__ = [
     "PreprocessingConfig",
     "load_train",
-    "load_test",
     "load_store",
     "clean_sales_dataframe",
     "clean_store",
