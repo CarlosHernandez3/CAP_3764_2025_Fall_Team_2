@@ -1,18 +1,24 @@
 from datetime import datetime
 import os
 import pickle
-from typing import List
+from typing import List, Optional
 
 import numpy as np
 import pandas as pd
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
+from joblib import load as joblib_load
 
 # Run the API:
 # 1. Open a terminal
 # 2. Activate env (run: conda activate store_sale_prediction_env)
 # 3. Move to repo root
 # 4. Run: uvicorn src.main:app --reload
+
+
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_MODEL_PATH = os.path.abspath(os.path.join(CURRENT_DIR, "..", "models"))
+DEFAULT_ARTIFACTS_PATH = os.path.abspath(os.path.join(CURRENT_DIR, "..", "artifacts"))
 
 
 FEATURE_COLUMNS = [
@@ -101,11 +107,17 @@ class BatchPredictionOutput(BaseModel):
 class ModelHandler:
     """Handles model loading and predictions."""
 
-    def __init__(self, model_path: str = "../models"):
-        self.model_path = model_path
+    def __init__(self, model_path: str = DEFAULT_MODEL_PATH, target_scaler_path: Optional[str] = None):
+        self.model_path = os.path.abspath(model_path)
+        self.target_scaler_path = (
+            os.path.abspath(target_scaler_path)
+            if target_scaler_path is not None
+            else DEFAULT_ARTIFACTS_PATH
+        )
         self.model = None
         self.scaler = None
         self.encoders = {}
+        self.target_scaler = None
         self.feature_names = FEATURE_COLUMNS.copy()
         self.model_version = "1.0.0"
         self.load_model()
@@ -121,6 +133,13 @@ class ModelHandler:
                     self.model = model_data.get("model")
                     self.scaler = model_data.get("scaler")
                     self.encoders = model_data.get("encoders", {})
+                    target_scaler = (
+                        model_data.get("target_scaler")
+                        or model_data.get("y_scaler")
+                        or model_data.get("output_scaler")
+                    )
+                    if target_scaler is not None:
+                        self.target_scaler = target_scaler
                     loaded_features = model_data.get("feature_names")
                     if loaded_features:
                         self.feature_names = loaded_features
@@ -132,6 +151,62 @@ class ModelHandler:
         except Exception as e:
             print(f"Error loading model: {e}")
             self.model = None
+
+        if self.target_scaler is None:
+            self._load_target_scaler_from_disk()
+
+    def _load_target_scaler_from_disk(self):
+        """Attempt to load a persisted target scaler to reverse scale predictions."""
+
+        candidate_files: List[str] = []
+
+        def add_candidate(path: Optional[str]):
+            if not path:
+                return
+            abs_path = os.path.abspath(path)
+            if abs_path not in candidate_files:
+                candidate_files.append(abs_path)
+
+        # Explicit path provided (file or directory)
+        if self.target_scaler_path:
+            if os.path.isdir(self.target_scaler_path):
+                for name in ("y_scaler.joblib", "target_scaler.joblib"):
+                    add_candidate(os.path.join(self.target_scaler_path, name))
+            else:
+                add_candidate(self.target_scaler_path)
+
+        # Model directory may also host the scaler
+        model_dir = self.model_path if os.path.isdir(self.model_path) else os.path.dirname(self.model_path)
+        if model_dir:
+            for name in ("y_scaler.joblib", "target_scaler.joblib"):
+                add_candidate(os.path.join(model_dir, name))
+
+        # Fallback to default artifacts directory
+        if os.path.isdir(DEFAULT_ARTIFACTS_PATH):
+            for name in ("y_scaler.joblib", "target_scaler.joblib"):
+                add_candidate(os.path.join(DEFAULT_ARTIFACTS_PATH, name))
+
+        for path in candidate_files:
+            if os.path.exists(path):
+                try:
+                    self.target_scaler = joblib_load(path)
+                    print(f"Loaded target scaler from {path}")
+                    return
+                except Exception as exc:
+                    print(f"Failed to load target scaler from {path}: {exc}")
+
+    def _inverse_scale_prediction(self, values: np.ndarray) -> np.ndarray:
+        """Reverse the scaling on model outputs when a target scaler is available."""
+
+        if self.target_scaler is None:
+            return values
+
+        reshaped = np.asarray(values, dtype=float).reshape(-1, 1)
+        try:
+            return self.target_scaler.inverse_transform(reshaped).ravel()
+        except Exception as exc:
+            print(f"Target inverse transform failed: {exc}")
+            return reshaped.ravel()
 
     def preprocess_input(self, data: dict) -> np.ndarray:
         """Preprocess input data for prediction."""
@@ -158,7 +233,11 @@ class ModelHandler:
             X = self.preprocess_input(data)
 
             if self.model is not None:
-                prediction = float(self.model.predict(X)[0])
+                model_output = np.asarray(self.model.predict(X)).reshape(-1)
+                if model_output.size == 0:
+                    raise ValueError("Model did not return any predictions")
+                unscaled = self._inverse_scale_prediction(model_output)
+                prediction = float(unscaled[0])
                 confidence = 0.85
             else:
                 # Fallback heuristic uses lag features to approximate current sales
