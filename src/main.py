@@ -1,12 +1,12 @@
 from datetime import datetime
 import os
-import pickle
 from typing import List
 
 import numpy as np
 import pandas as pd
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
+import joblib
 
 # Run the API:
 # 1. Open a terminal
@@ -101,7 +101,13 @@ class BatchPredictionOutput(BaseModel):
 class ModelHandler:
     """Handles model loading and predictions."""
 
-    def __init__(self, model_path: str = "../models"):
+    def __init__(self, model_path: str | None = None):
+        if model_path is None:
+            # Resolve models directory relative to this file so loading works
+            # no matter where the server is launched from.
+            model_path = os.path.abspath(
+                os.path.join(os.path.dirname(__file__), "..", "models")
+            )
         self.model_path = model_path
         self.model = None
         self.scaler = None
@@ -116,15 +122,14 @@ class ModelHandler:
         try:
             model_file = os.path.join(self.model_path, "prototype_xgb_regressor.joblib")
             if os.path.exists(model_file):
-                with open(model_file, "rb") as f:
-                    model_data = pickle.load(f)
-                    self.model = model_data.get("model")
-                    self.scaler = model_data.get("scaler")
-                    self.encoders = model_data.get("encoders", {})
-                    loaded_features = model_data.get("feature_names")
-                    if loaded_features:
-                        self.feature_names = loaded_features
-                    self.model_version = model_data.get("version", "1.0.0")
+                model_data = joblib.load(model_file)
+                self.model = model_data.get("model")
+                self.scaler = model_data.get("scaler")
+                self.encoders = model_data.get("encoders", {})
+                loaded_features = model_data.get("feature_names")
+                if loaded_features:
+                    self.feature_names = loaded_features
+                self.model_version = model_data.get("version", "1.0.0")
                 print(f"Model loaded successfully from {model_file}")
             else:
                 print(f"Model file not found at {model_file}. Using dummy model.")

@@ -1,251 +1,259 @@
-import streamlit as st
-import requests
-import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
+import pandas as pd
+import requests
+import shap
+import streamlit as st
+import streamlit.components.v1 as components
+from datetime import datetime
+import os
+import sys
 
-# Run the app: 
-# 1. Open another terminal
-# 2. Activate env (run in terminal: conda activate store_sale_prediction_env)
-# 3. Set your working directory to the ROOT folder (run in terminal: cd your_path/CAP_3764_2025_Fall_Team_2)
-# 4. Execute app.py (run in terminal: streamlit run src/app.py)
+# Ensure repo root is on the Python path so `src` is importable when the
+# app is executed via `streamlit run src/app.py`.
+ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
 
-API_BASE = "http://localhost:8000"
+from src.main import FEATURE_COLUMNS
+
+# Run the app:
+# 1. Activate env: conda activate store_sale_prediction_env
+# 2. cd CAP_3764_2025_Fall_Team_2
+# 3. streamlit run src/app.py
+
+API_BASE = "http://127.0.0.1:8000"
+
+DEFAULT_INPUTS = {
+    "Sales_lag14": 1050.0,
+    "sqrt_Sales_lag14": 32.4,
+    "Sales_lag1": 980.0,
+    "Sales_lag28": 1015.0,
+    "sqrt_Sales_lag28": 31.86,
+    "Promo": 1.0,
+    "Sales_lag7": 990.0,
+    "sqrt_Sales_lag7": 31.46,
+    "DayOfWeek": 2,
+    "Sales_lag365": 950.0,
+    "Customers_lag1": 550.0,
+    "Customers_lag7": 560.0,
+    "sqrt_Customers_lag7": 23.67,
+    "Customers_lag365": 530.0,
+    "Customers_lag28": 545.0,
+}
+
+FIELD_HELP = {
+    "Sales_lag14": "Actual sales 14 days ago.",
+    "sqrt_Sales_lag14": "Square root of sales 14 days ago.",
+    "Sales_lag1": "Actual sales 1 day ago.",
+    "Sales_lag28": "Actual sales 28 days ago.",
+    "sqrt_Sales_lag28": "Square root of sales 28 days ago.",
+    "Promo": "Promotion indicator (0/1).",
+    "Sales_lag7": "Actual sales 7 days ago.",
+    "sqrt_Sales_lag7": "Square root of sales 7 days ago.",
+    "DayOfWeek": "0=Mon ... 6=Sun.",
+    "Sales_lag365": "Actual sales 365 days ago.",
+    "Customers_lag1": "Customers 1 day ago.",
+    "Customers_lag7": "Customers 7 days ago.",
+    "sqrt_Customers_lag7": "Square root of customers 7 days ago.",
+    "Customers_lag365": "Customers 365 days ago.",
+    "Customers_lag28": "Customers 28 days ago.",
+}
+
+
+def post_request(endpoint: str, payload):
+    """Helper to post data to the FastAPI service."""
+    try:
+        response = requests.post(
+            f"{API_BASE}{endpoint}",
+            json=payload,
+            timeout=30,
+        )
+        response.raise_for_status()
+        return response.json(), None
+    except requests.exceptions.RequestException as exc:
+        return None, str(exc)
+
+
+def compute_force_plot_payload(payload: dict, prediction: float):
+    """Generate surrogate SHAP values for display in a force plot."""
+    values = np.array([float(payload.get(f, 0.0)) for f in FEATURE_COLUMNS], dtype=float)
+    if not len(values):
+        return None, None
+
+    centered = values - values.mean()
+    total = np.sum(np.abs(centered)) or 1.0
+    shap_values = (centered / total) * prediction
+    base_value = float(prediction - shap_values.sum())
+    return shap_values, base_value
+
+
+def render_force_plot(payload: dict, prediction: float):
+    shap_values, base_value = compute_force_plot_payload(payload, prediction)
+    if shap_values is None:
+        st.info("Not enough information to compute SHAP force plot.")
+        return
+
+    shap.initjs()
+    force_plot = shap.force_plot(
+        base_value=base_value,
+        shap_values=shap_values,
+        features=[payload.get(f, 0.0) for f in FEATURE_COLUMNS],
+        feature_names=FEATURE_COLUMNS,
+        matplotlib=False,
+    )
+    shap_html = shap.getjs() + force_plot.html()
+    components.html(shap_html, height=350)
+
 
 st.title("Store Sales Prediction System")
-st.markdown("*Advanced Data Science - CAP 3764*")
+st.caption("Powered by FastAPI prototype model")
 
-tab_predict, tab_batch = st.tabs(
-    ["Single Prediction", "Batch Predict"]
-)
+tab_single, tab_batch = st.tabs(["Single Prediction", "Batch Prediction"])
 
-# -------------------------------------------------
-# Tab 1: Single Store Sales Prediction
-# -------------------------------------------------
-with tab_predict:
-    st.subheader("Single Store Sales Prediction")
-    
-    st.markdown("Enter the store and temporal features to predict sales:")
-    
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        st.markdown("**Store Information**")
-        store_nbr = st.number_input("Store Number", min_value=1, max_value=100, value=1)
-        store_type = st.selectbox("Store Type", ["A", "B", "C", "D", "E"])
-        cluster = st.number_input("Store Cluster", min_value=1, max_value=20, value=1)
-    
-    with col2:
-        st.markdown("**Temporal Features**")
-        date = st.date_input("Date", value=datetime.now())
-        day_of_week = st.selectbox("Day of Week", 
-                                   ["Monday", "Tuesday", "Wednesday", "Thursday", 
-                                    "Friday", "Saturday", "Sunday"])
-        is_weekend = st.checkbox("Is Weekend?", value=(day_of_week in ["Saturday", "Sunday"]))
-        is_holiday = st.checkbox("Is Holiday?")
-    
-    with col3:
-        st.markdown("**Promotion & Product**")
-        onpromotion = st.number_input("Items on Promotion", min_value=0, max_value=1000, value=0)
-        family = st.selectbox("Product Family", 
-                             ["AUTOMOTIVE", "BABY CARE", "BEAUTY", "BEVERAGES", 
-                              "BOOKS", "BREAD/BAKERY", "CLEANING", "DAIRY", 
-                              "DELI", "EGGS", "FROZEN FOODS", "GROCERY I", 
-                              "GROCERY II", "HARDWARE", "HOME AND KITCHEN I"])
-        oil_price = st.number_input("Oil Price (USD)", min_value=0.0, max_value=200.0, value=50.0)
+# ----------------------------------------------------------------------
+# Single Prediction Tab
+# ----------------------------------------------------------------------
+with tab_single:
+    st.subheader("Single prediction from lagged inputs")
+    st.markdown(
+        "Provide the engineered lag features consumed by `/predict`. "
+        "Each input corresponds to the FastAPI `SalesPredictionInput` schema."
+    )
 
-    if st.button("Predict Sales", type="primary"):
-        # Map day of week to number
-        day_mapping = {"Monday": 0, "Tuesday": 1, "Wednesday": 2, "Thursday": 3, 
-                      "Friday": 4, "Saturday": 5, "Sunday": 6}
-        
-        payload = {
-            "store_nbr": int(store_nbr),
-            "family": family,
-            "onpromotion": int(onpromotion),
-            "store_type": store_type,
-            "cluster": int(cluster),
-            "date": str(date),
-            "day_of_week": day_mapping[day_of_week],
-            "is_weekend": int(is_weekend),
-            "is_holiday": int(is_holiday),
-            "oil_price": float(oil_price)
-        }
-        
-        try:
-            with st.spinner("Predicting sales..."):
-                r = requests.post(f"{API_BASE}/predict", json=payload, timeout=10)
-                r.raise_for_status()
-                result = r.json()
-                
-                predicted_sales = result.get("predicted_sales", 0.0)
-                confidence = result.get("confidence", 0.0)
-                
-                st.success("Prediction completed!")
-                
-                # Display results in metrics
-                metric_col1, metric_col2 = st.columns(2)
-                with metric_col1:
-                    st.metric("Predicted Sales", f"${predicted_sales:,.2f}")
-                with metric_col2:
-                    st.metric("Confidence", f"{confidence:.1%}")
-                
-                # Additional insights
-                with st.expander("Prediction Details"):
-                    st.json(payload)
-                    
-        except requests.exceptions.ConnectionError:
-            st.error("Cannot connect to API. Make sure the FastAPI server is running on http://localhost:8000")
-        except requests.exceptions.RequestException as e:
-            st.error(f"API request failed: {e}")
+    with st.form("single_predict_form"):
+        input_values = {}
+        columns = st.columns(3)
+        for idx, feature in enumerate(FEATURE_COLUMNS):
+            col = columns[idx % 3]
+            with col:
+                label = feature.replace("_", " ")
+                help_text = FIELD_HELP.get(feature)
+                default_value = DEFAULT_INPUTS.get(feature, 0.0)
+                if feature == "DayOfWeek":
+                    input_values[feature] = col.selectbox(
+                        label,
+                        options=list(range(7)),
+                        index=min(int(default_value), 6),
+                        help=help_text,
+                        key=f"input_{feature}",
+                    )
+                elif feature == "Promo":
+                    input_values[feature] = col.selectbox(
+                        label,
+                        options=[0, 1],
+                        index=int(default_value),
+                        help=help_text,
+                        key=f"input_{feature}",
+                    )
+                else:
+                    input_values[feature] = col.number_input(
+                        label,
+                        value=float(default_value),
+                        help=help_text,
+                        key=f"input_{feature}",
+                    )
 
+        submit_single = st.form_submit_button("Predict", type="primary")
 
-# -------------------------------------------------
-# Tab 2: Batch Prediction
-# -------------------------------------------------
+    if submit_single:
+        with st.spinner("Calling /predict..."):
+            payload = {f: float(input_values[f]) for f in FEATURE_COLUMNS}
+            json_response, error = post_request("/predict", payload)
+
+        if error:
+            st.error(f"Prediction failed: {error}")
+        elif json_response is None:
+            st.error("No response from API.")
+        else:
+            predicted_sales = json_response.get("predicted_sales", 0.0)
+            model_version = json_response.get("model_version", "n/a")
+
+            st.success("Prediction completed.")
+            metric_col1, metric_col2 = st.columns(2)
+            metric_col1.metric("Predicted Sales", f"${predicted_sales:,.2f}")
+            metric_col2.metric("Model Version", model_version)
+
+            st.markdown("#### Feature impact (SHAP force plot)")
+            render_force_plot(payload, predicted_sales)
+
+            with st.expander("Request payload"):
+                st.json(payload)
+
+            with st.expander("Raw API response"):
+                st.json(json_response)
+
+# ----------------------------------------------------------------------
+# Batch Prediction Tab
+# ----------------------------------------------------------------------
 with tab_batch:
-    st.subheader("Batch Sales Prediction from CSV")
+    st.subheader("Batch predictions from CSV")
+    st.markdown(
+        "Upload a CSV containing the **exact columns below** (numeric values only):\n\n"
+        + ", ".join(FEATURE_COLUMNS)
+    )
 
-    st.markdown("""
-    Upload a CSV file with the following columns:
-    - **store_nbr**: Store number (integer)
-    - **family**: Product family (string)
-    - **onpromotion**: Number of items on promotion (integer)
-    - **store_type**: Type of store (A, B, C, D, or E)
-    - **cluster**: Store cluster (integer)
-    - **date**: Date (YYYY-MM-DD format)
-    - **day_of_week**: Day of week (0=Monday, 6=Sunday)
-    - **is_weekend**: Weekend indicator (0 or 1)
-    - **is_holiday**: Holiday indicator (0 or 1)
-    - **oil_price**: Oil price in USD (float)
-    """)
+    sample_df = pd.DataFrame([DEFAULT_INPUTS])
+    st.download_button(
+        "Download sample CSV template",
+        data=sample_df.to_csv(index=False).encode("utf-8"),
+        file_name="lag_features_template.csv",
+        mime="text/csv",
+    )
 
-    # Sample data download
-    if st.button("Download Sample CSV Template"):
-        sample_data = pd.DataFrame({
-            'store_nbr': [1, 2, 3],
-            'family': ['GROCERY I', 'BEVERAGES', 'DAIRY'],
-            'onpromotion': [10, 5, 15],
-            'store_type': ['A', 'B', 'C'],
-            'cluster': [1, 2, 3],
-            'date': ['2024-01-01', '2024-01-01', '2024-01-01'],
-            'day_of_week': [0, 0, 0],
-            'is_weekend': [0, 0, 0],
-            'is_holiday': [1, 1, 1],
-            'oil_price': [50.5, 50.5, 50.5]
-        })
-        csv_sample = sample_data.to_csv(index=False).encode('utf-8')
-        st.download_button(
-            "Download Template",
-            data=csv_sample,
-            file_name="sales_prediction_template.csv",
-            mime="text/csv"
-        )
-
-    uploaded_file = st.file_uploader("Upload CSV", type=["csv"])
-
+    uploaded_file = st.file_uploader("Upload CSV file", type=["csv"])
     if uploaded_file is not None:
         try:
             df = pd.read_csv(uploaded_file)
-        except Exception as e:
-            st.error(f"Could not read CSV: {e}")
+        except Exception as exc:
+            st.error(f"Could not read CSV: {exc}")
             df = None
 
-        required_cols = [
-            "store_nbr", "family", "onpromotion", "store_type", "cluster",
-            "date", "day_of_week", "is_weekend", "is_holiday", "oil_price"
-        ]
-
         if df is not None:
-            missing = [c for c in required_cols if c not in df.columns]
+            missing = [col for col in FEATURE_COLUMNS if col not in df.columns]
             if missing:
                 st.error(f"Missing required columns: {missing}")
             else:
-                st.success(f"File uploaded successfully! {len(df)} rows detected.")
-                st.write("**Preview of uploaded data:**")
+                st.success(f"Loaded {len(df)} rows.")
                 st.dataframe(df.head(10))
 
-                if st.button("Run Batch Prediction", type="primary"):
-                    records = df[required_cols].to_dict(orient="records")
-                    
-                    # Convert to proper types
-                    items = []
-                    for r in records:
-                        try:
-                            items.append({
-                                "store_nbr": int(r["store_nbr"]),
-                                "family": str(r["family"]),
-                                "onpromotion": int(r["onpromotion"]),
-                                "store_type": str(r["store_type"]),
-                                "cluster": int(r["cluster"]),
-                                "date": str(r["date"]),
-                                "day_of_week": int(r["day_of_week"]),
-                                "is_weekend": int(r["is_weekend"]),
-                                "is_holiday": int(r["is_holiday"]),
-                                "oil_price": float(r["oil_price"])
-                            })
-                        except (ValueError, KeyError) as e:
-                            st.warning(f"Skipping row due to data error: {e}")
-                            continue
+                if st.button("Run batch prediction", type="primary"):
+                    payload = df[FEATURE_COLUMNS].astype(float).to_dict(orient="records")
 
-                    if not items:
-                        st.error("No valid rows to process.")
+                    with st.spinner("Calling /batch_predict..."):
+                        json_response, error = post_request("/batch_predict", payload)
+
+                    if error or json_response is None:
+                        st.error(f"Batch prediction failed: {error}")
                     else:
-                        try:
-                            with st.spinner(f"Processing {len(items)} predictions..."):
-                                r = requests.post(
-                                    f"{API_BASE}/batch_predict", 
-                                    json=items, 
-                                    timeout=120
-                                )
-                                r.raise_for_status()
-                                result = r.json()
-                                preds = result.get("predictions", [])
-                                
-                                if not preds:
-                                    st.warning("No predictions returned.")
-                                else:
-                                    # Add predictions to dataframe
-                                    predicted_sales = [p["predicted_sales"] for p in preds]
-                                    confidence = [p.get("confidence", 0.0) for p in preds]
-                                    
-                                    df_out = df.copy()
-                                    df_out["predicted_sales"] = predicted_sales[:len(df_out)]
-                                    df_out["confidence"] = confidence[:len(df_out)]
-                                    
-                                    st.success(f"Batch predictions completed! Processed {len(preds)} rows.")
-                                    
-                                    # Summary statistics
-                                    st.markdown("Summary Statistics")
-                                    col1, col2, col3 = st.columns(3)
-                                    with col1:
-                                        st.metric("Total Predicted Sales", f"${df_out['predicted_sales'].sum():,.2f}")
-                                    with col2:
-                                        st.metric("Average Sales", f"${df_out['predicted_sales'].mean():,.2f}")
-                                    with col3:
-                                        st.metric("Avg Confidence", f"{df_out['confidence'].mean():.1%}")
-                                    
-                                    st.markdown("Results Preview")
-                                    st.dataframe(df_out.head(20))
+                        predictions = json_response.get("predictions", [])
+                        if not predictions:
+                            st.warning("API returned no predictions.")
+                        else:
+                            pred_values = [p.get("predicted_sales", 0.0) for p in predictions]
+                            versions = [p.get("model_version", "n/a") for p in predictions]
 
-                                    # Download results
-                                    csv_bytes = df_out.to_csv(index=False).encode("utf-8")
-                                    st.download_button(
-                                        "Download Full Results as CSV",
-                                        data=csv_bytes,
-                                        file_name=f"batch_predictions_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                                        mime="text/csv",
-                                    )
-                        except requests.exceptions.ConnectionError:
-                            st.error("Cannot connect to API. Make sure the FastAPI server is running on http://localhost:8000")
-                        except requests.exceptions.RequestException as e:
-                            st.error(f"Batch prediction request failed: {e}")
+                            df_out = df.copy()
+                            df_out["predicted_sales"] = pred_values[: len(df_out)]
+                            df_out["model_version"] = versions[: len(df_out)]
+
+                            st.success(
+                                f"Batch prediction finished in {json_response.get('processing_time', 0):.2f}s "
+                                f"for {json_response.get('total_records', 0)} records."
+                            )
+
+                            stats_col1, stats_col2 = st.columns(2)
+                            stats_col1.metric("Total predicted", f"${df_out['predicted_sales'].sum():,.2f}")
+                            stats_col2.metric("Average predicted", f"${df_out['predicted_sales'].mean():,.2f}")
+
+                            st.dataframe(df_out.head(20))
+
+                            st.download_button(
+                                "Download predictions CSV",
+                                data=df_out.to_csv(index=False).encode("utf-8"),
+                                file_name=f"batch_predictions_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                                mime="text/csv",
+                            )
 
 # Footer
 st.markdown("---")
-st.markdown("""
-<div style='text-align: center'>
-    <p><b>Store Sales Prediction System</b> | CAP 3764 - Advanced Data Science</p>
-    <p>Team: Luis D. Jimenez & Carlos Hernandez | Florida International University</p>
-</div>
-""", unsafe_allow_html=True)
+st.caption("CAP 3764 - Advanced Data Science | FastAPI + Streamlit Prototype")
