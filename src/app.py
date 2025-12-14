@@ -24,39 +24,25 @@ from src.main import FEATURE_COLUMNS
 API_BASE = "http://127.0.0.1:8000"
 
 DEFAULT_INPUTS = {
-    "Sales_lag14": 1050.0,
+    "Open": 1.0,
     "sqrt_Sales_lag14": 32.4,
+    "Sales_lag14": 1050.0,
     "Sales_lag1": 980.0,
     "Sales_lag28": 1015.0,
     "sqrt_Sales_lag28": 31.86,
     "Promo": 1.0,
     "Sales_lag7": 990.0,
-    "sqrt_Sales_lag7": 31.46,
-    "DayOfWeek": 2,
-    "Sales_lag365": 950.0,
-    "Customers_lag1": 550.0,
-    "Customers_lag7": 560.0,
-    "sqrt_Customers_lag7": 23.67,
-    "Customers_lag365": 530.0,
-    "Customers_lag28": 545.0,
 }
 
 FIELD_HELP = {
-    "Sales_lag14": "Actual sales 14 days ago.",
+    "Open": "Store open indicator (1=open, 0=closed).",
     "sqrt_Sales_lag14": "Square root of sales 14 days ago.",
+    "Sales_lag14": "Actual sales 14 days ago.",
     "Sales_lag1": "Actual sales 1 day ago.",
     "Sales_lag28": "Actual sales 28 days ago.",
     "sqrt_Sales_lag28": "Square root of sales 28 days ago.",
     "Promo": "Promotion indicator (0/1).",
     "Sales_lag7": "Actual sales 7 days ago.",
-    "sqrt_Sales_lag7": "Square root of sales 7 days ago.",
-    "DayOfWeek": "0=Mon ... 6=Sun.",
-    "Sales_lag365": "Actual sales 365 days ago.",
-    "Customers_lag1": "Customers 1 day ago.",
-    "Customers_lag7": "Customers 7 days ago.",
-    "sqrt_Customers_lag7": "Square root of customers 7 days ago.",
-    "Customers_lag365": "Customers 365 days ago.",
-    "Customers_lag28": "Customers 28 days ago.",
 }
 
 
@@ -129,15 +115,7 @@ with tab_single:
                 label = feature.replace("_", " ")
                 help_text = FIELD_HELP.get(feature)
                 default_value = DEFAULT_INPUTS.get(feature, 0.0)
-                if feature == "DayOfWeek":
-                    input_values[feature] = col.selectbox(
-                        label,
-                        options=list(range(7)),
-                        index=min(int(default_value), 6),
-                        help=help_text,
-                        key=f"input_{feature}",
-                    )
-                elif feature == "Promo":
+                if feature in {"Promo", "Open"}:
                     input_values[feature] = col.selectbox(
                         label,
                         options=[0, 1],

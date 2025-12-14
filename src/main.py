@@ -8,6 +8,8 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 import joblib
 
+import xgboost
+
 # Run the API:
 # 1. Open a terminal
 # 2. Activate env (run: conda activate store_sale_prediction_env)
@@ -16,21 +18,14 @@ import joblib
 
 
 FEATURE_COLUMNS = [
-    "Sales_lag14",
+    "Open",
     "sqrt_Sales_lag14",
+    "Sales_lag14",
     "Sales_lag1",
     "Sales_lag28",
     "sqrt_Sales_lag28",
     "Promo",
     "Sales_lag7",
-    "sqrt_Sales_lag7",
-    "DayOfWeek",
-    "Sales_lag365",
-    "Customers_lag1",
-    "Customers_lag7",
-    "sqrt_Customers_lag7",
-    "Customers_lag365",
-    "Customers_lag28",
 ]
 
 
@@ -44,40 +39,26 @@ app = FastAPI(
 class SalesPredictionInput(BaseModel):
     """Input schema for single prediction built from engineered lag features."""
 
-    Sales_lag14: float = Field(..., description="Sales 14 days ago")
+    Open: float = Field(..., description="Store open flag (0/1)")
     sqrt_Sales_lag14: float = Field(..., description="Square root of sales 14 days ago")
+    Sales_lag14: float = Field(..., description="Sales 14 days ago")
     Sales_lag1: float = Field(..., description="Sales 1 day ago")
     Sales_lag28: float = Field(..., description="Sales 28 days ago")
     sqrt_Sales_lag28: float = Field(..., description="Square root of sales 28 days ago")
     Promo: float = Field(..., description="Promotion flag or strength")
     Sales_lag7: float = Field(..., description="Sales 7 days ago")
-    sqrt_Sales_lag7: float = Field(..., description="Square root of sales 7 days ago")
-    DayOfWeek: int = Field(..., ge=0, le=6, description="Day of week (0=Monday)")
-    Sales_lag365: float = Field(..., description="Sales 365 days ago")
-    Customers_lag1: float = Field(..., description="Customer count 1 day ago")
-    Customers_lag7: float = Field(..., description="Customer count 7 days ago")
-    sqrt_Customers_lag7: float = Field(..., description="Square root of customer count 7 days ago")
-    Customers_lag365: float = Field(..., description="Customer count 365 days ago")
-    Customers_lag28: float = Field(..., description="Customer count 28 days ago")
 
     class Config:
         json_schema_extra = {
             "example": {
-                "Sales_lag14": 1050.0,
+                "Open": 1.0,
                 "sqrt_Sales_lag14": 32.40,
+                "Sales_lag14": 1050.0,
                 "Sales_lag1": 980.0,
                 "Sales_lag28": 1015.0,
                 "sqrt_Sales_lag28": 31.86,
                 "Promo": 1.0,
                 "Sales_lag7": 990.0,
-                "sqrt_Sales_lag7": 31.46,
-                "DayOfWeek": 2,
-                "Sales_lag365": 950.0,
-                "Customers_lag1": 550.0,
-                "Customers_lag7": 560.0,
-                "sqrt_Customers_lag7": 23.67,
-                "Customers_lag365": 530.0,
-                "Customers_lag28": 545.0,
             }
         }
 
@@ -111,10 +92,15 @@ class ModelHandler:
         self.model_path = model_path
         self.model = None
         self.scaler = None
+        self.target_scaler = None
         self.encoders = {}
         self.feature_names = FEATURE_COLUMNS.copy()
         self.model_version = "1.0.0"
+        self.target_scaler_path = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "artifacts", "y_scaler.joblib")
+        )
         self.load_model()
+        self.load_target_scaler()
 
     def load_model(self):
         """Load the trained model and preprocessing objects."""
@@ -123,13 +109,19 @@ class ModelHandler:
             model_file = os.path.join(self.model_path, "prototype_xgb_regressor.joblib")
             if os.path.exists(model_file):
                 model_data = joblib.load(model_file)
-                self.model = model_data.get("model")
-                self.scaler = model_data.get("scaler")
-                self.encoders = model_data.get("encoders", {})
-                loaded_features = model_data.get("feature_names")
-                if loaded_features:
-                    self.feature_names = loaded_features
-                self.model_version = model_data.get("version", "1.0.0")
+                if isinstance(model_data, dict):
+                    self.model = model_data.get("model")
+                    self.scaler = model_data.get("scaler")
+                    self.encoders = model_data.get("encoders", {})
+                    loaded_features = model_data.get("feature_names")
+                    if loaded_features:
+                        self.feature_names = loaded_features
+                    self.model_version = model_data.get("version", "1.0.0")
+                else:
+                    # File contains the estimator directly
+                    self.model = model_data
+                    if hasattr(self.model, "feature_names_in_"):
+                        self.feature_names = list(self.model.feature_names_in_)
                 print(f"Model loaded successfully from {model_file}")
             else:
                 print(f"Model file not found at {model_file}. Using dummy model.")
@@ -137,6 +129,31 @@ class ModelHandler:
         except Exception as e:
             print(f"Error loading model: {e}")
             self.model = None
+
+    def load_target_scaler(self):
+        """Load the scaler used to revert predictions to original scale."""
+
+        if not os.path.exists(self.target_scaler_path):
+            print(f"Target scaler not found at {self.target_scaler_path}.")
+            return
+        try:
+            self.target_scaler = joblib.load(self.target_scaler_path)
+            print(f"Loaded target scaler from {self.target_scaler_path}")
+        except Exception as exc:
+            print(f"Error loading target scaler: {exc}")
+            self.target_scaler = None
+
+    def inverse_scale_prediction(self, value: float) -> float:
+        """Invert scaling on the prediction using the stored target scaler."""
+
+        if self.target_scaler is None:
+            return value
+        try:
+            arr = np.array(value, dtype=float).reshape(-1, 1)
+            return float(self.target_scaler.inverse_transform(arr)[0][0])
+        except Exception as exc:
+            print(f"Target inverse scaling failed: {exc}")
+            return value
 
     def preprocess_input(self, data: dict) -> np.ndarray:
         """Preprocess input data for prediction."""
@@ -180,6 +197,8 @@ class ModelHandler:
                 weekday_factor = 1.05 if data.get("DayOfWeek", 0) in (4, 5) else 1.0
                 prediction = float(max(0.0, base_sales * promo_factor * weekday_factor))
                 confidence = 0.65
+
+            prediction = self.inverse_scale_prediction(prediction)
 
             return {
                 "predicted_sales": prediction,
