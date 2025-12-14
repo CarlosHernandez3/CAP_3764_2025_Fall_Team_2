@@ -15,8 +15,8 @@ API_BASE = "http://localhost:8000"
 st.title("Store Sales Prediction System")
 st.markdown("*Advanced Data Science - CAP 3764*")
 
-tab_predict, tab_batch, tab_analytics = st.tabs(
-    ["Single Prediction", "Batch Predict", "Analytics"]
+tab_predict, tab_batch = st.tabs(
+    ["Single Prediction", "Batch Predict"]
 )
 
 # -------------------------------------------------
@@ -240,74 +240,6 @@ with tab_batch:
                             st.error("Cannot connect to API. Make sure the FastAPI server is running on http://localhost:8000")
                         except requests.exceptions.RequestException as e:
                             st.error(f"Batch prediction request failed: {e}")
-
-
-# -------------------------------------------------
-# Tab 3: Analytics Dashboard
-# -------------------------------------------------
-with tab_analytics:
-    st.subheader("Sales Analytics Dashboard")
-    
-    st.markdown("""
-    This section provides analytics and insights based on historical predictions.
-    Upload your historical data or batch prediction results to visualize trends.
-    """)
-    
-    analytics_file = st.file_uploader("Upload Historical Data/Results CSV", type=["csv"], key="analytics")
-    
-    if analytics_file is not None:
-        try:
-            df_analytics = pd.read_csv(analytics_file)
-            
-            st.success(f"Loaded {len(df_analytics)} records for analysis")
-            
-            # Check for required columns
-            if 'predicted_sales' in df_analytics.columns or 'sales' in df_analytics.columns:
-                sales_col = 'predicted_sales' if 'predicted_sales' in df_analytics.columns else 'sales'
-                
-                # Summary metrics
-                st.markdown("Overall Metrics")
-                col1, col2, col3, col4 = st.columns(4)
-                with col1:
-                    st.metric("Total Sales", f"${df_analytics[sales_col].sum():,.2f}")
-                with col2:
-                    st.metric("Average Sales", f"${df_analytics[sales_col].mean():,.2f}")
-                with col3:
-                    st.metric("Max Sales", f"${df_analytics[sales_col].max():,.2f}")
-                with col4:
-                    st.metric("Min Sales", f"${df_analytics[sales_col].min():,.2f}")
-                
-                # Sales by store type
-                if 'store_type' in df_analytics.columns:
-                    st.markdown("Sales by Store Type")
-                    store_type_sales = df_analytics.groupby('store_type')[sales_col].agg(['sum', 'mean', 'count'])
-                    st.dataframe(store_type_sales.style.format({
-                        'sum': '${:,.2f}',
-                        'mean': '${:,.2f}',
-                        'count': '{:,.0f}'
-                    }))
-                
-                # Sales by product family
-                if 'family' in df_analytics.columns:
-                    st.markdown("Top Product Families")
-                    family_sales = df_analytics.groupby('family')[sales_col].sum().sort_values(ascending=False).head(10)
-                    st.bar_chart(family_sales)
-                
-                # Promotion impact
-                if 'onpromotion' in df_analytics.columns:
-                    st.markdown("Promotion Impact Analysis")
-                    promo_analysis = df_analytics.groupby('onpromotion')[sales_col].mean()
-                    st.line_chart(promo_analysis)
-                
-                # Data distribution
-                st.markdown("Sales Distribution")
-                st.write(df_analytics[sales_col].describe())
-                
-            else:
-                st.warning("No sales column found. Please upload data with 'sales' or 'predicted_sales' column.")
-                
-        except Exception as e:
-            st.error(f"Error processing analytics data: {e}")
 
 # Footer
 st.markdown("---")
